@@ -168,6 +168,16 @@ export const verifyRegistrationOtp = async (
 		user.otpAttempts = 0;
 		await user.save();
 
+		try {
+			await sendEmail(
+				user.email,
+				"Welcome to My Shop - Registration successful",
+				`<p>Hello ${escapeHtml(user.name)}, your account has been verified and registered successfully. You can now log in and start shopping.</p>`
+			);
+		} catch (error) {
+			console.error("Welcome email delivery failed:", error);
+		}
+
 		res.status(200).json({ message: "Email verified. You can now log in" });
 	} catch (error) {
 		console.error("OTP verification failed:", error);
