@@ -4,11 +4,8 @@ export interface IUser extends Document {
     name: string;
     email: string;
     password: string;
-    phone?: string;
     emailVerified?: boolean;
-    phoneVerified?: boolean;
     emailOtpHash?: string | null;
-    phoneOtpHash?: string | null;
     otpExpiresAt?: Date | null;
     otpAttempts?: number;
     otpLastSentAt?: Date | null;
@@ -30,20 +27,13 @@ const userSchema = new Schema<IUser>(
             trim: true,
         },
 
-        phone: {
-            type: String,
-            trim: true,
-        },
-
         password: {
             type: String,
             required: true,
         },
 
         emailVerified: Boolean,
-        phoneVerified: Boolean,
         emailOtpHash: String,
-        phoneOtpHash: String,
         otpExpiresAt: Date,
         otpAttempts: Number,
         otpLastSentAt: Date,
@@ -52,7 +42,5 @@ const userSchema = new Schema<IUser>(
         timestamps: true,
     }
 );
-
-userSchema.index({ phone: 1 }, { unique: true, sparse: true });
 
 export const User = mongoose.model<IUser>("User", userSchema);

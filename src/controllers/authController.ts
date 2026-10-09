@@ -4,7 +4,6 @@ import jwt from "jsonwebtoken";
 import { randomInt } from "node:crypto";
 import { User } from "../models/User";
 import { sendEmail } from "../utils/sendEmail";
-import { sendSms } from "../utils/sendSms";
 
 const OTP_EXPIRY_MS = 10 * 60 * 1000;
 const OTP_RESEND_WAIT_MS = 60 * 1000;
@@ -25,33 +24,21 @@ const escapeHtml = (value: string): string =>
 const createOtp = (): string =>
 	randomInt(0, 1_000_000).toString().padStart(6, "0");
 
-const issueOtps = async (user: InstanceType<typeof User>): Promise<void> => {
-	if (!user.phone) {
-		throw new Error("A phone number is required to send verification codes");
-	}
+const issueOtp = async (user: InstanceType<typeof User>): Promise<void> => {
+	const otp = createOtp();
 
-	const emailOtp = createOtp();
-	const phoneOtp = createOtp();
-
-	user.emailOtpHash = await bcrypt.hash(emailOtp, 10);
-	user.phoneOtpHash = await bcrypt.hash(phoneOtp, 10);
+	user.emailOtpHash = await bcrypt.hash(otp, 10);
 	user.otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
 	user.otpAttempts = 0;
 	user.otpLastSentAt = new Date();
 	await user.save();
 
 	try {
-		await Promise.all([
-			sendEmail(
-				user.email,
-				"Verify your account",
-				`<p>Hello ${escapeHtml(user.name)},</p><p>Your email verification code is <strong>${emailOtp}</strong>.</p><p>It expires in 10 minutes.</p>`
-			),
-			sendSms(
-				user.phone,
-				`Your verification code is ${phoneOtp}. It expires in 10 minutes.`
-			),
-		]);
+		await sendEmail(
+			user.email,
+			"Verify your account",
+			`<p>Hello ${escapeHtml(user.name)},</p><p>Your email verification code is <strong>${otp}</strong>.</p><p>It expires in 10 minutes.</p>`
+		);
 	} catch (error) {
 		user.otpLastSentAt = null;
 		await user.save();
@@ -64,40 +51,28 @@ export const registerUser = async (
 	res: Response
 ): Promise<void> => {
 	try {
-		const { name, email, phone, password } = req.body;
+		const { name, email, password } = req.body;
 
 		if (
 			typeof name !== "string" ||
 			typeof email !== "string" ||
-			typeof phone !== "string" ||
 			typeof password !== "string" ||
 			!name.trim() ||
 			!email.trim() ||
-			!phone.trim() ||
 			!password
 		) {
 			res.status(400).json({
-				message: "Name, email, phone, and password are required",
+				message: "Name, email, and password are required",
 			});
 			return;
 		}
 
 		const normalizedEmail = email.trim().toLowerCase();
-		const normalizedPhone = phone.trim();
-		if (!/^\+[1-9]\d{7,14}$/.test(normalizedPhone)) {
-			res.status(400).json({
-				message: "Phone must be in international E.164 format, such as +2507XXXXXXXX",
-			});
-			return;
-		}
-
-		const existingUser = await User.findOne({
-			$or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
-		});
+		const existingUser = await User.findOne({ email: normalizedEmail });
 
 		if (existingUser) {
 			res.status(409).json({
-				message: "Email or phone is already registered",
+				message: "Email is already registered",
 			});
 			return;
 		}
@@ -106,29 +81,26 @@ export const registerUser = async (
 		const user = await User.create({
 			name: name.trim(),
 			email: normalizedEmail,
-			phone: normalizedPhone,
 			password: hashedPassword,
 			emailVerified: false,
-			phoneVerified: false,
 		});
 
 		try {
-			await issueOtps(user);
+			await issueOtp(user);
 		} catch (error) {
-			console.error("OTP delivery failed:", error);
+			console.error("Email verification delivery failed:", error);
 			res.status(502).json({
-				message: "Account created but verification codes could not be sent. Request new codes shortly",
+				message: "Account created but the verification email could not be sent. Request a new code shortly",
 			});
 			return;
 		}
 
 		res.status(201).json({
-			message: "Verification codes sent to your email and phone",
+			message: "Verification code sent to your email",
 			user: {
 				id: user._id,
 				name: user.name,
 				email: user.email,
-				phone: user.phone,
 			},
 		});
 	} catch (error) {
@@ -139,28 +111,26 @@ export const registerUser = async (
 	}
 };
 
-export const verifyRegistrationOtps = async (
+export const verifyRegistrationOtp = async (
 	req: Request,
 	res: Response
 ): Promise<void> => {
 	try {
-		const { email, emailOtp, phoneOtp } = req.body;
+		const { email, emailOtp } = req.body;
 
 		if (
 			typeof email !== "string" ||
 			typeof emailOtp !== "string" ||
-			typeof phoneOtp !== "string" ||
-			!/^\d{6}$/.test(emailOtp) ||
-			!/^\d{6}$/.test(phoneOtp)
+			!/^\d{6}$/.test(emailOtp)
 		) {
 			res.status(400).json({
-				message: "Email and both six-digit verification codes are required",
+				message: "Email and a six-digit verification code are required",
 			});
 			return;
 		}
 
 		const user = await User.findOne({ email: email.trim().toLowerCase() });
-		if (!user || user.emailVerified || user.phoneVerified) {
+		if (!user || user.emailVerified) {
 			res.status(400).json({ message: "Invalid verification request" });
 			return;
 		}
@@ -175,36 +145,30 @@ export const verifyRegistrationOtps = async (
 		if (
 			!user.otpExpiresAt ||
 			user.otpExpiresAt.getTime() <= Date.now() ||
-			!user.emailOtpHash ||
-			!user.phoneOtpHash
+			!user.emailOtpHash
 		) {
 			res.status(400).json({
-				message: "Verification codes expired. Request new codes",
+				message: "Verification code expired. Request a new code",
 			});
 			return;
 		}
 
-		const [emailMatches, phoneMatches] = await Promise.all([
-			bcrypt.compare(emailOtp, user.emailOtpHash),
-			bcrypt.compare(phoneOtp, user.phoneOtpHash),
-		]);
+		const emailMatches = await bcrypt.compare(emailOtp, user.emailOtpHash);
 
-		if (!emailMatches || !phoneMatches) {
+		if (!emailMatches) {
 			user.otpAttempts = (user.otpAttempts ?? 0) + 1;
 			await user.save();
-			res.status(400).json({ message: "Invalid verification codes" });
+			res.status(400).json({ message: "Invalid verification code" });
 			return;
 		}
 
 		user.emailVerified = true;
-		user.phoneVerified = true;
 		user.emailOtpHash = null;
-		user.phoneOtpHash = null;
 		user.otpExpiresAt = null;
 		user.otpAttempts = 0;
 		await user.save();
 
-		res.status(200).json({ message: "Email and phone verified. You can now log in" });
+		res.status(200).json({ message: "Email verified. You can now log in" });
 	} catch (error) {
 		console.error("OTP verification failed:", error);
 		res.status(500).json({ message: "Failed to verify codes" });
@@ -223,7 +187,7 @@ export const resendRegistrationOtps = async (
 		}
 
 		const user = await User.findOne({ email: email.trim().toLowerCase() });
-		if (!user || user.emailVerified || user.phoneVerified || !user.phone) {
+		if (!user || user.emailVerified) {
 			res.status(200).json({
 				message: "If the account needs verification, new codes will be sent",
 			});
@@ -238,12 +202,12 @@ export const resendRegistrationOtps = async (
 			return;
 		}
 
-		await issueOtps(user);
-		res.status(200).json({ message: "New verification codes sent" });
+		await issueOtp(user);
+		res.status(200).json({ message: "New verification code sent" });
 	} catch (error) {
-		console.error("Resending verification codes failed:", error);
+		console.error("Resending verification email failed:", error);
 		res.status(502).json({
-			message: "Could not send verification codes. Check Brevo configuration",
+			message: "Could not send verification email. Check Brevo configuration",
 		});
 	}
 };
@@ -277,9 +241,9 @@ export const loginUser = async (
 			return;
 		}
 
-		if (user.emailVerified === false || user.phoneVerified === false) {
+		if (!user.emailVerified) {
 			res.status(403).json({
-				message: "Verify your email and phone before logging in",
+				message: "Verify your email before logging in",
 			});
 			return;
 		}
