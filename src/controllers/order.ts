@@ -89,13 +89,39 @@ export const getMyOrders = async (
 			return;
 		}
 
-		const orders = await Order.find({ userId: req.userId })
-			.populate("productId", "name category price imageUrl")
-			.sort({ createdAt: -1 });
+		const parsePositiveInteger = (value: unknown, fallback: number): number => {
+			if (typeof value !== "string" || value.trim() === "") {
+				return fallback;
+			}
+
+			const parsed = Number(value);
+			return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+		};
+		const page = parsePositiveInteger(req.query.page, 1);
+		const limit = Math.min(parsePositiveInteger(req.query.limit, 10), 50);
+		const skip = (page - 1) * limit;
+		const filter = { userId: req.userId };
+		const [orders, total] = await Promise.all([
+			Order.find(filter)
+				.populate("productId", "name category price imageUrl")
+				.sort({ createdAt: -1 })
+				.skip(skip)
+				.limit(limit)
+				.lean(),
+			Order.countDocuments(filter),
+		]);
+		const totalPages = Math.ceil(total / limit);
 
 		res.status(200).json({
-			count: orders.length,
-			orders,
+			data: orders,
+			pagination: {
+				page,
+				limit,
+				total,
+				totalPages,
+				hasNextPage: page < totalPages,
+				hasPrevPage: page > 1,
+			},
 		});
 	} catch {
 		res.status(500).json({
